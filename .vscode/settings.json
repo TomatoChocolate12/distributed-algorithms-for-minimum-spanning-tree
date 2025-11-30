@@ -3,6 +3,7 @@
         "iostream": "cpp",
         "algorithm": "cpp",
         "set": "cpp",
-        "limits": "cpp"
+        "limits": "cpp",
+        "iosfwd": "cpp"
     }
 }

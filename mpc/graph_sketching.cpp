@@ -1,16 +1,29 @@
-// mpi_mst_sketch.cpp
-// Distributed Karger-Klein-Tarjan style MST (graph sketching) using MPI.
+// mpi_mst_boruvka_chunk_sketch_flags.cpp
+// MPI-based distributed MST with optional chunked processing and XOR-based sketch connectivity.
+// Adds command-line flags for tuning L (levels), R (repetitions), chunk_size and mode.
 //
 // Compile:
-//   mpicxx -O3 -std=c++17 -o mpi_mst_sketch mpi_mst_sketch.cpp
+//   mpicxx -std=c++17 -O2 -o mpi_mst_boruvka_chunk_sketch_flags mpi_mst_boruvka_chunk_sketch_flags.cpp
 //
-// Run:
-//   mpirun -n <P> ./mpi_mst_sketch edges.txt N_vertices [--block] [--debug]
+// Run format:
+//   mpirun -np <P> ./mpi_mst_boruvka_chunk_sketch_flags edges.txt n_vertices [--mode=<mode>] [--L=<levels>] [--R=<reps>] [--chunk_size=<size>]
+//
+// Examples:
+//   mpirun -np 4 ./mpi_mst_boruvka_chunk_sketch_flags edges.txt 1000 --mode=chunk+sketch --L=20 --R=4 --chunk_size=1000
+//   mpirun -np 8 ./mpi_mst_boruvka_chunk_sketch_flags edges.txt 50000 --mode=sketch --L=24 --R=8
+//
+// Flags (all optional):
+//   --mode: one of {default, chunk, sketch, chunk+sketch}. Default: default (deterministic gather-based Boruvka).
+//   --L: number of sketch levels (int). Default: 20.
+//   --R: number of sketch repetitions (int). Default: 4.
+//   --chunk_size: chunk size (approx edges per chunk). Default: n_vertices (i.e., process chunks of size ~= n).
+//   -h, --help : print this usage message.
 //
 // Notes:
-// - edges.txt: u v w  (0-indexed vertices)
-// - This focuses on correctness and the KKT sampling/filtering idea.
-// - Root (rank 0) prints MST edges at the end.
+//  - The program stores a comp[] array (size n_vertices) on every process (linear memory per machine).
+//  - The sketch primitive is probabilistic but uses verification, so accepted edges are always valid; you may need
+//    to tune L and R to increase success probability for large graphs.
+//
 
 #include <mpi.h>
 #include <bits/stdc++.h>
@@ -19,378 +32,477 @@ using namespace std;
 struct Edge {
     int u, v;
     double w;
-    uint64_t id; // optional unique id for stability
+    long long gid; // global edge index (0-based)
 };
 
-struct UF {
+static const double INF = 1e300;
+
+// DSU for contraction
+struct DSU {
+    int n;
     vector<int> p, r;
-    UF(int n=0) { init(n); }
-    void init(int n) { p.resize(n); r.assign(n,0); iota(p.begin(), p.end(), 0); }
-    int find(int x){ while (p[x]!=x){ p[x]=p[p[x]]; x=p[x]; } return x; }
+    DSU(int n=0): n(n), p(n), r(n,0){
+        for(int i=0;i<n;i++) p[i]=i;
+    }
+    int find(int a){ return p[a]==a ? a : p[a]=find(p[a]); }
     bool unite(int a,int b){
-        a=find(a); b=find(b); if (a==b) return false;
-        if (r[a]<r[b]) p[a]=b; else { p[b]=a; if (r[a]==r[b]) r[a]++; } return true;
+        a=find(a); b=find(b);
+        if(a==b) return false;
+        if(r[a]<r[b]) swap(a,b);
+        p[b]=a;
+        if(r[a]==r[b]) r[a]++;
+        return true;
     }
 };
 
-// ---------- Utility: read partitioned edges (round-robin by default) ----------
-vector<Edge> load_partitioned_edges_roundrobin(const string &file, int rank, int size) {
+// Read partitioned edges (round-robin by line index).
+vector<Edge> read_partitioned_edges_with_gid(const string &filename, int rank, int nproc){
     vector<Edge> edges;
-    ifstream in(file);
-    if (!in) { if (rank==0) cerr<<"Cannot open "<<file<<"\n"; MPI_Abort(MPI_COMM_WORLD,1); }
+    ifstream in(filename);
+    if(!in){
+        if(rank==0) cerr << "Error: cannot open " << filename << endl;
+        MPI_Abort(MPI_COMM_WORLD, 1);
+    }
     string line;
-    long long idx=0;
-    uint64_t uid = ((uint64_t)rank<<32) ^ 1469598103934665603ULL;
-    while (getline(in,line)) {
-        if (line.empty()) { idx++; continue; }
-        if ((idx % size) != rank) { idx++; continue; }
-        stringstream ss(line);
-        int u,v; double w;
-        if (!(ss>>u>>v>>w)) { idx++; continue; }
-        edges.push_back({u,v,w, uid++});
+    long long idx = 0;
+    while(getline(in,line)){
+        if(line.empty()) { idx++; continue; }
+        if(line[0]=='#'){ idx++; continue; }
+        if(idx % nproc == rank){
+            stringstream ss(line);
+            int u,v; double w;
+            if(!(ss>>u>>v>>w)) { idx++; continue; }
+            edges.push_back({u,v,w, idx});
+        }
         idx++;
     }
     return edges;
 }
 
-// ---------- Sequential Kruskal (used at base case on root) ----------
-vector<Edge> kruskal_local(vector<Edge> &edges, int n) {
-    vector<int> idx(edges.size());
-    iota(idx.begin(), idx.end(), 0);
-    sort(idx.begin(), idx.end(), [&](int a, int b){
-        if (edges[a].w != edges[b].w) return edges[a].w < edges[b].w;
-        if (edges[a].u != edges[b].u) return edges[a].u < edges[b].u;
-        return edges[a].v < edges[b].v;
+void local_sort_edges(vector<Edge> &edges){
+    sort(edges.begin(), edges.end(), [](const Edge &a, const Edge &b){
+        if(a.w != b.w) return a.w < b.w;
+        if(a.u != b.u) return a.u < b.u;
+        return a.v < b.v;
     });
-    UF uf(n);
-    vector<Edge> out;
-    out.reserve(n>0 ? n-1 : 0);
-    for (int i: idx) {
-        Edge &e = edges[i];
-        if (uf.unite(e.u, e.v)) out.push_back(e);
-        if ((int)out.size() == n-1) break;
+}
+
+vector<double> serialize_edges_double(const vector<Edge> &E){
+    vector<double> out;
+    out.reserve(E.size()*3);
+    for(auto &e: E){
+        out.push_back((double)e.u);
+        out.push_back((double)e.v);
+        out.push_back(e.w);
     }
     return out;
 }
 
-// ---------- Build adjacency from edges (for MST forest) ----------
-vector<vector<pair<int, pair<int,double>>>> build_adj(int n, const vector<Edge> &mst) {
-    // returns adj[v] = list of (to, (edge_index_or_dummy, weight))
-    vector<vector<pair<int, pair<int,double>>>> adj(n);
-    adj.assign(n, {});
-    for (size_t i=0;i<mst.size();++i) {
-        const Edge &e = mst[i];
-        adj[e.u].push_back({e.v, {(int)i, e.w}});
-        adj[e.v].push_back({e.u, {(int)i, e.w}});
+vector<Edge> deserialize_edges_double(const vector<double> &buf){
+    vector<Edge> out;
+    int L = buf.size() / 3;
+    out.reserve(L);
+    for(int i=0;i<L;i++){
+        int u = (int)buf[3*i+0];
+        int v = (int)buf[3*i+1];
+        double w = buf[3*i+2];
+        out.push_back({u,v,w,-1});
     }
-    return adj;
+    return out;
 }
 
-// ---------- LCA + max-edge on path (binary lifting) ----------
-struct LCA {
-    int n, LOG;
-    vector<int> depth;
-    vector<vector<int>> up;      // up[k][v] = 2^k ancestor
-    vector<vector<double>> mx;  // mx[k][v] = max edge weight on path from v up 2^k
-    LCA() : n(0), LOG(0) {}
-    void build(int N, const vector<vector<pair<int,pair<int,double>>>> &adj) {
-        n = N;
-        LOG = 1;
-        while ((1<<LOG) <= n) LOG++;
-        depth.assign(n, -1);
-        up.assign(LOG, vector<int>(n, -1));
-        mx.assign(LOG, vector<double>(n, -1.0));
-        // run DFS/BFS from all roots (forest)
-        for (int s=0;s<n;++s) if (depth[s] == -1) {
-            // root s
-            depth[s] = 0;
-            up[0][s] = s;
-            mx[0][s] = -1.0; // no edge to root
-            deque<int> dq; dq.push_back(s);
-            while (!dq.empty()) {
-                int v = dq.front(); dq.pop_front();
-                for (auto &ed : adj[v]) {
-                    int to = ed.first;
-                    double w = ed.second.second;
-                    if (depth[to] == -1) {
-                        depth[to] = depth[v] + 1;
-                        up[0][to] = v;
-                        mx[0][to] = w;
-                        dq.push_back(to);
-                    }
+// Deterministic connectivity (gather best per component)
+vector<pair<pair<int,int>, double>> deterministic_component_candidates_and_contract(
+    const vector<Edge> &local_edges,
+    vector<int> &comp, // size n_vertices, current comp labels (shared across processes)
+    int rank, int nproc, int n_vertices
+){
+    unordered_map<int, pair<double, pair<int,int>>> local_best;
+    for(auto &e: local_edges){
+        int cu = comp[e.u];
+        int cv = comp[e.v];
+        if(cu == cv) continue;
+        if(local_best.find(cu)==local_best.end() || e.w < local_best[cu].first){
+            local_best[cu] = {e.w, {e.u, e.v}};
+        }
+        if(local_best.find(cv)==local_best.end() || e.w < local_best[cv].first){
+            local_best[cv] = {e.w, {e.v, e.u}};
+        }
+    }
+    vector<double> packed;
+    packed.reserve(local_best.size()*4);
+    for(auto &kv: local_best){
+        int compId = kv.first;
+        double w = kv.second.first;
+        int u = kv.second.second.first;
+        int v = kv.second.second.second;
+        packed.push_back((double)compId);
+        packed.push_back(w);
+        packed.push_back((double)u);
+        packed.push_back((double)v);
+    }
+    int mylen = (int)packed.size();
+    vector<int> recvcounts(nproc);
+    MPI_Allgather(&mylen, 1, MPI_INT, recvcounts.data(), 1, MPI_INT, MPI_COMM_WORLD);
+    vector<int> displs(nproc);
+    int total = 0;
+    for(int i=0;i<nproc;i++){ displs[i]=total; total += recvcounts[i]; }
+    vector<double> recvbuf(total);
+    MPI_Allgatherv(packed.data(), mylen, MPI_DOUBLE,
+                   recvbuf.data(), recvcounts.data(), displs.data(), MPI_DOUBLE,
+                   MPI_COMM_WORLD);
+    unordered_map<int, pair<double, pair<int,int>>> global_best;
+    int idx = 0;
+    while(idx + 3 < total){
+        int compId = (int)recvbuf[idx++];
+        double w = recvbuf[idx++];
+        int u = (int)recvbuf[idx++];
+        int v = (int)recvbuf[idx++];
+        auto &cur = global_best[compId];
+        if(global_best.find(compId) == global_best.end() || w < cur.first){
+            global_best[compId] = {w, {u,v}};
+        }
+    }
+    vector<pair<pair<int,int>, double>> chosen;
+    {
+        unordered_set<int> comps_set;
+        for(int v=0; v<n_vertices; ++v) comps_set.insert(comp[v]);
+        unordered_map<int,int> comp_to_idx;
+        int k = 0;
+        for(int x: comps_set) comp_to_idx[x] = k++;
+        DSU comp_dsu(k);
+        for(auto &kv: global_best){
+            int compId = kv.first;
+            auto pr = kv.second.second; double w = kv.second.first;
+            int u = pr.first, v = pr.second;
+            int cu = comp[u], cv = comp[v];
+            if(cu == cv) continue;
+            comp_dsu.unite(comp_to_idx[cu], comp_to_idx[cv]);
+            chosen.push_back({{u,v}, w});
+        }
+        vector<int> newComp(n_vertices);
+        unordered_map<int,int> remap;
+        int cur = 0;
+        for(int v=0; v<n_vertices; ++v){
+            int x = comp[v];
+            int rootidx = comp_dsu.find(comp_to_idx[x]);
+            if(remap.find(rootidx)==remap.end()) remap[rootidx] = cur++;
+            newComp[v] = remap[rootidx];
+        }
+        MPI_Bcast(newComp.data(), n_vertices, MPI_INT, 0, MPI_COMM_WORLD);
+        comp = newComp;
+    }
+    int rank_world;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank_world);
+    if(rank_world==0) return chosen;
+    else return {};
+}
+
+// --- Sketch primitive ---
+inline uint64_t splitmix64(uint64_t x) {
+    x += 0x9e3779b97f4a7c15ULL;
+    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
+    x = x ^ (x >> 31);
+    return x;
+}
+int ctz_u64(uint64_t x){ if(x==0) return 64; return __builtin_ctzll(x); }
+
+vector<pair<pair<int,int>, double>> sketch_component_candidates_and_contract(
+    const vector<Edge> &local_edges,
+    vector<int> &comp,
+    int rank, int nproc, int n_vertices,
+    int L = 20, int R = 4
+){
+    int levels = L;
+    size_t total_entries = (size_t)n_vertices * levels;
+    vector<uint64_t> xor_key_local(total_entries), xor_u_local(total_entries), xor_v_local(total_entries);
+    vector<unsigned char> parity_local(total_entries);
+    vector<uint64_t> xor_key_global(total_entries), xor_u_global(total_entries), xor_v_global(total_entries);
+    vector<unsigned char> parity_global(total_entries);
+    vector<pair<pair<int,int>, double>> chosen_edges_root;
+
+    for(int rep=0; rep<R; ++rep){
+        fill(xor_key_local.begin(), xor_key_local.end(), 0ULL);
+        fill(xor_u_local.begin(), xor_u_local.end(), 0ULL);
+        fill(xor_v_local.begin(), xor_v_local.end(), 0ULL);
+        fill(parity_local.begin(), parity_local.end(), 0);
+        uint64_t seed = ((uint64_t)rep + 0x9e3779b97f4a7c15ULL) ^ 0x123456789abcdefULL;
+        for(const auto &e: local_edges){
+            int cu = comp[e.u], cv = comp[e.v];
+            if(cu == cv) continue;
+            uint64_t a = (uint64_t)min(e.u,e.v);
+            uint64_t b = (uint64_t)max(e.u,e.v);
+            uint64_t h = splitmix64( (a << 32) ^ b ^ seed );
+            if(h==0) h = 1;
+            int level = ctz_u64(h);
+            if(level >= levels) level = levels-1;
+            size_t idx1 = (size_t)cu * levels + level;
+            size_t idx2 = (size_t)cv * levels + level;
+            xor_key_local[idx1] ^= h;
+            xor_u_local[idx1] ^= (uint64_t)e.u;
+            xor_v_local[idx1] ^= (uint64_t)e.v;
+            parity_local[idx1] ^= 1;
+            xor_key_local[idx2] ^= h;
+            xor_u_local[idx2] ^= (uint64_t)e.u;
+            xor_v_local[idx2] ^= (uint64_t)e.v;
+            parity_local[idx2] ^= 1;
+        }
+        MPI_Allreduce(xor_key_local.data(), xor_key_global.data(), (int)total_entries, MPI_UNSIGNED_LONG_LONG, MPI_BXOR, MPI_COMM_WORLD);
+        MPI_Allreduce(xor_u_local.data(), xor_u_global.data(), (int)total_entries, MPI_UNSIGNED_LONG_LONG, MPI_BXOR, MPI_COMM_WORLD);
+        MPI_Allreduce(xor_v_local.data(), xor_v_global.data(), (int)total_entries, MPI_UNSIGNED_LONG_LONG, MPI_BXOR, MPI_COMM_WORLD);
+        MPI_Allreduce(parity_local.data(), parity_global.data(), (int)total_entries, MPI_UNSIGNED_CHAR, MPI_BXOR, MPI_COMM_WORLD);
+        vector<pair<int, pair<int,int>>> local_candidates;
+        local_candidates.reserve((size_t)n_vertices/10);
+        for(int cid=0; cid < n_vertices; ++cid){
+            for(int l=0; l<levels; ++l){
+                size_t pos = (size_t)cid * levels + l;
+                if(parity_global[pos] & 1u){
+                    int cu = (int)xor_u_global[pos];
+                    int cv = (int)xor_v_global[pos];
+                    if(cu == cv) continue;
+                    local_candidates.push_back({cid, {cu, cv}});
+                    break;
                 }
             }
         }
-        // binary lifting
-        for (int k=1;k<LOG;++k) {
-            for (int v=0; v<n; ++v) {
-                up[k][v] = up[k-1][ up[k-1][v] ];
-                mx[k][v] = max(mx[k-1][v], mx[k-1][ up[k-1][v] ]);
+        sort(local_candidates.begin(), local_candidates.end(), [](auto &a, auto &b){ return a.first < b.first; });
+        vector<double> local_minw(local_candidates.size(), INF);
+        for(size_t i=0;i<local_candidates.size();++i){
+            int u = local_candidates[i].second.first;
+            int v = local_candidates[i].second.second;
+            double best = INF;
+            for(const auto &e: local_edges){
+                if( (e.u==u && e.v==v) || (e.u==v && e.v==u) ){
+                    if(comp[e.u] != comp[e.v]) best = min(best, e.w);
+                }
             }
+            local_minw[i] = best;
+        }
+        vector<double> global_minw(local_candidates.size(), INF);
+        if(local_candidates.size() > 0){
+            MPI_Allreduce(local_minw.data(), global_minw.data(), (int)local_candidates.size(), MPI_DOUBLE, MPI_MIN, MPI_COMM_WORLD);
+        }
+        unordered_set<int> used_components;
+        vector<pair<pair<int,int>, double>> chosen_this_rep;
+        for(size_t i=0;i<local_candidates.size();++i){
+            int cid = local_candidates[i].first;
+            if(used_components.find(cid) != used_components.end()) continue;
+            if(global_minw[i] < INF){
+                int u = local_candidates[i].second.first;
+                int v = local_candidates[i].second.second;
+                double w = global_minw[i];
+                chosen_this_rep.push_back({{u,v}, w});
+                used_components.insert(cid);
+            }
+        }
+        unordered_set<int> comps_set;
+        for(int v=0; v<n_vertices; ++v) comps_set.insert(comp[v]);
+        unordered_map<int,int> comp_to_idx; int idx=0;
+        for(int x: comps_set) comp_to_idx[x]=idx++;
+        DSU comp_dsu(idx);
+        for(auto &pe: chosen_this_rep){
+            int u = pe.first.first, v = pe.first.second;
+            int cu = comp[u], cv = comp[v];
+            if(cu==cv) continue;
+            comp_dsu.unite(comp_to_idx[cu], comp_to_idx[cv]);
+        }
+        vector<int> newComp(n_vertices);
+        unordered_map<int,int> remap; int cur=0;
+        for(int v=0; v<n_vertices; ++v){
+            int rootidx = comp_dsu.find(comp_to_idx[ comp[v] ]);
+            if(remap.find(rootidx)==remap.end()) remap[rootidx] = cur++;
+            newComp[v] = remap[rootidx];
+        }
+        MPI_Bcast(newComp.data(), n_vertices, MPI_INT, 0, MPI_COMM_WORLD);
+        comp = newComp;
+        int rank_local; MPI_Comm_rank(MPI_COMM_WORLD, &rank_local);
+        if(rank_local==0){
+            for(auto &pe: chosen_this_rep) chosen_edges_root.push_back(pe);
         }
     }
-    // return max edge weight on path u-v in the forest (if disconnected path, returns +inf for safety or -inf? we'll handle)
-    double max_on_path(int u, int v) {
-        if (u == v) return -1.0;
-        if (depth[u] < depth[v]) swap(u,v);
-        double ans = -1.0;
-        // lift u up to depth v
-        int diff = depth[u] - depth[v];
-        for (int k=0; k<LOG; ++k) if (diff & (1<<k)) {
-            ans = max(ans, mx[k][u]);
-            u = up[k][u];
-        }
-        if (u == v) return ans;
-        for (int k = LOG-1; k>=0; --k) {
-            if (up[k][u] != up[k][v]) {
-                ans = max(ans, mx[k][u]);
-                ans = max(ans, mx[k][v]);
-                u = up[k][u];
-                v = up[k][v];
-            }
-        }
-        // now u and v are children of LCA
-        ans = max(ans, mx[0][u]);
-        ans = max(ans, mx[0][v]);
-        return ans;
-    }
-};
-
-// ---------- Distributed Boruvka (centralized merging at root for simplicity) ----------
-vector<Edge> distributed_boruvka(vector<Edge> &local_edges, int n, bool debug) {
-    int rank, size; MPI_Comm_rank(MPI_COMM_WORLD, &rank); MPI_Comm_size(MPI_COMM_WORLD, &size);
-    vector<int> comp(n);
-    iota(comp.begin(), comp.end(), 0);
-    vector<Edge> mst; mst.reserve(n>0 ? n-1 : 0);
-    int iter = 0;
-    while (true) {
-        iter++;
-        // local best per component
-        unordered_map<int, tuple<double,int,int>> local_best;
-        for (auto &e : local_edges) {
-            int cu = comp[e.u], cv = comp[e.v];
-            if (cu == cv) continue;
-            auto it = local_best.find(cu);
-            if (it==local_best.end() || e.w < get<0>(it->second)) local_best[cu] = {e.w, e.u, e.v};
-            it = local_best.find(cv);
-            if (it==local_best.end() || e.w < get<0>(it->second)) local_best[cv] = {e.w, e.u, e.v};
-        }
-        // serialize local best to arrays
-        int k_local = (int)local_best.size();
-        vector<int> comps; comps.reserve(k_local);
-        vector<int> us; us.reserve(k_local);
-        vector<int> vs; vs.reserve(k_local);
-        vector<double> ws; ws.reserve(k_local);
-        for (auto &kv: local_best) {
-            comps.push_back(kv.first);
-            ws.push_back(get<0>(kv.second));
-            us.push_back(get<1>(kv.second));
-            vs.push_back(get<2>(kv.second));
-        }
-        // gather counts
-        vector<int> counts(size);
-        MPI_Allgather(&k_local, 1, MPI_INT, counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
-        vector<int> comps_recvcounts(size), us_recvcounts(size), vs_recvcounts(size), ws_recvcounts(size);
-        for (int i=0;i<size;++i) comps_recvcounts[i] = counts[i];
-        int total_k = 0; for (int x: counts) total_k += x;
-        vector<int> displ(size,0);
-        for (int i=1;i<size;++i) displ[i] = displ[i-1] + comps_recvcounts[i-1];
-        // gather arrays to root
-        vector<int> all_comps; vector<int> all_us; vector<int> all_vs; vector<double> all_ws;
-        if (rank==0) { all_comps.resize(total_k); all_us.resize(total_k); all_vs.resize(total_k); all_ws.resize(total_k); }
-        MPI_Gatherv(comps.data(), k_local, MPI_INT, rank==0 ? all_comps.data() : nullptr, comps_recvcounts.data(), displ.data(), MPI_INT, 0, MPI_COMM_WORLD);
-        MPI_Gatherv(us.data(), k_local, MPI_INT, rank==0 ? all_us.data() : nullptr, comps_recvcounts.data(), displ.data(), MPI_INT, 0, MPI_COMM_WORLD);
-        MPI_Gatherv(vs.data(), k_local, MPI_INT, rank==0 ? all_vs.data() : nullptr, comps_recvcounts.data(), displ.data(), MPI_INT, 0, MPI_COMM_WORLD);
-        MPI_Gatherv(ws.data(), k_local, MPI_DOUBLE, rank==0 ? all_ws.data() : nullptr, comps_recvcounts.data(), displ.data(), MPI_DOUBLE, 0, MPI_COMM_WORLD);
-
-        // root picks global best per component
-        vector<Edge> chosen;
-        if (rank==0) {
-            unordered_map<int, tuple<double,int,int>> global_best;
-            for (int i=0;i<total_k;++i) {
-                int c = all_comps[i];
-                double w = all_ws[i];
-                int u = all_us[i], v = all_vs[i];
-                auto it = global_best.find(c);
-                if (it==global_best.end() || w < get<0>(it->second)) global_best[c] = {w,u,v};
-            }
-            // deduplicate and collect chosen edges
-            unordered_set<uint64_t> seen;
-            for (auto &kv: global_best) {
-                double w; int u,v; tie(w,u,v) = kv.second;
-                uint64_t key = ((uint64_t)min(u,v) << 32) ^ (uint64_t)max(u,v) ^ (uint64_t)lrint(w*100000.0);
-                if (seen.insert(key).second) chosen.push_back({u,v,w,0});
-            }
-        }
-
-        // broadcast count of chosen edges
-        int chosen_local = (int)chosen.size();
-        int chosen_global = 0;
-        MPI_Allreduce(&chosen_local, &chosen_global, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
-        if (chosen_global == 0) break;
-        // broadcast chosen edges from root to all
-        vector<int> chosen_us, chosen_vs; vector<double> chosen_ws;
-        if (rank==0) {
-            chosen_us.reserve(chosen.size()); chosen_vs.reserve(chosen.size()); chosen_ws.reserve(chosen.size());
-            for (auto &e: chosen) { chosen_us.push_back(e.u); chosen_vs.push_back(e.v); chosen_ws.push_back(e.w); }
-        }
-        // We need to broadcast length and arrays; root sets them
-        int root_k = (rank==0 ? (int)chosen.size() : 0);
-        MPI_Bcast(&root_k, 1, MPI_INT, 0, MPI_COMM_WORLD);
-        chosen_us.resize(root_k); chosen_vs.resize(root_k); chosen_ws.resize(root_k);
-        MPI_Bcast(chosen_us.data(), root_k, MPI_INT, 0, MPI_COMM_WORLD);
-        MPI_Bcast(chosen_vs.data(), root_k, MPI_INT, 0, MPI_COMM_WORLD);
-        MPI_Bcast(chosen_ws.data(), root_k, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-
-        // root computes new comp mapping
-        vector<int> new_comp(n);
-        vector<Edge> to_add;
-        if (rank==0) {
-            UF uf(n);
-            for (int i=0;i<root_k;++i) {
-                int u = chosen_us[i], v = chosen_vs[i];
-                int cu = comp[u], cv = comp[v];
-                if (cu != cv) uf.unite(cu, cv);
-            }
-            unordered_map<int,int> maproot;
-            int nextid = 0;
-            for (int i=0;i<n;++i) {
-                int r = uf.find(comp[i]);
-                auto it = maproot.find(r);
-                if (it==maproot.end()) { maproot[r] = nextid++; new_comp[i] = maproot[r]; }
-                else new_comp[i] = it->second;
-            }
-            for (int i=0;i<root_k;++i) {
-                int u = chosen_us[i], v = chosen_vs[i];
-                if (comp[u] != comp[v]) to_add.push_back({u,v,chosen_ws[i],0});
-            }
-        }
-        // broadcast new_comp
-        MPI_Bcast(new_comp.data(), n, MPI_INT, 0, MPI_COMM_WORLD);
-        // update comp on all ranks
-        comp.swap(new_comp);
-        // root appends MST edges
-        if (rank==0) {
-            for (auto &e: to_add) mst.push_back(e);
-        }
-        // termination check: comp is replicated identical now
-        unordered_set<int> uniq(comp.begin(), comp.end());
-        if ((int)uniq.size() <= 1) break;
-    } // while
-    return mst;
+    int rank_world;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank_world);
+    if(rank_world==0) return chosen_edges_root;
+    else return {};
 }
 
-// ---------- Distributed KKT / graph-sketching MST ----------
-vector<Edge> distributed_kkt_mst(vector<Edge> &local_edges, int n, bool debug, int base_threshold=1024) {
-    int rank,size; MPI_Comm_rank(MPI_COMM_WORLD, &rank); MPI_Comm_size(MPI_COMM_WORLD, &size);
-
-    // compute global edge count
-    int local_m = (int)local_edges.size();
-    int global_m = 0;
-    MPI_Allreduce(&local_m, &global_m, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
-
-    if (debug && rank==0) cerr<<"distributed_kkt_mst: global_m="<<global_m<<"\n";
-
-    // base case: if global edges small => gather to root and run Kruskal
-    if (global_m <= base_threshold) {
-        // gather sizes
-        vector<int> counts(size);
-        MPI_Allgather(&local_m, 1, MPI_INT, counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
-        vector<int> displs(size,0);
-        int total = 0; for (int i=0;i<size;++i) { displs[i]=total; total+=counts[i]; }
-        // pack local edges into arrays (u,v,w)
-        vector<int> loc_u(local_m), loc_v(local_m);
-        vector<double> loc_w(local_m);
-        for (int i=0;i<local_m;++i) { loc_u[i]=local_edges[i].u; loc_v[i]=local_edges[i].v; loc_w[i]=local_edges[i].w; }
-        vector<int> all_u(total), all_v(total); vector<double> all_w(total);
-        MPI_Gatherv(loc_u.data(), local_m, MPI_INT, rank==0?all_u.data():nullptr, counts.data(), displs.data(), MPI_INT, 0, MPI_COMM_WORLD);
-        MPI_Gatherv(loc_v.data(), local_m, MPI_INT, rank==0?all_v.data():nullptr, counts.data(), displs.data(), MPI_INT, 0, MPI_COMM_WORLD);
-        MPI_Gatherv(loc_w.data(), local_m, MPI_DOUBLE, rank==0?all_w.data():nullptr, counts.data(), displs.data(), MPI_DOUBLE, 0, MPI_COMM_WORLD);
-        vector<Edge> mst_global;
-        if (rank==0) {
-            vector<Edge> edges_all; edges_all.reserve(total);
-            for (int i=0;i<total;++i) edges_all.push_back({all_u[i], all_v[i], all_w[i], (uint64_t)i});
-            mst_global = kruskal_local(edges_all, n);
-        }
-        // broadcast mst size and edges from root to all
-        int mst_sz = rank==0 ? (int)mst_global.size() : 0;
-        MPI_Bcast(&mst_sz, 1, MPI_INT, 0, MPI_COMM_WORLD);
-        vector<int> mst_u(mst_sz), mst_v(mst_sz); vector<double> mst_w(mst_sz);
-        if (rank==0) {
-            for (int i=0;i<mst_sz;++i){ mst_u[i]=mst_global[i].u; mst_v[i]=mst_global[i].v; mst_w[i]=mst_global[i].w; }
-        }
-        MPI_Bcast(mst_u.data(), mst_sz, MPI_INT, 0, MPI_COMM_WORLD);
-        MPI_Bcast(mst_v.data(), mst_sz, MPI_INT, 0, MPI_COMM_WORLD);
-        MPI_Bcast(mst_w.data(), mst_sz, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-        vector<Edge> mst_rep; mst_rep.reserve(mst_sz);
-        for (int i=0;i<mst_sz;++i) mst_rep.push_back({mst_u[i], mst_v[i], mst_w[i], (uint64_t)i});
-        return mst_rep;
+vector<Edge> local_maximal_forest_by_comp(const vector<Edge> &edges_subset, const vector<int> &comp, int n_vertices){
+    vector<Edge> E = edges_subset;
+    sort(E.begin(), E.end(), [](const Edge &a, const Edge &b){ return a.w < b.w; });
+    unordered_map<int,int> mapc; int idx=0;
+    for(int v=0; v<n_vertices; ++v) if(mapc.find(comp[v])==mapc.end()) mapc[comp[v]] = idx++;
+    DSU dsu(idx);
+    vector<Edge> picked;
+    for(auto &e: E){
+        int cu = mapc[ comp[e.u] ];
+        int cv = mapc[ comp[e.v] ];
+        if(cu == cv) continue;
+        if(dsu.unite(cu, cv)) picked.push_back(e);
     }
-
-    // 1) Sample each edge with probability 1/2 (independently) locally
-    std::mt19937_64 rng((uint64_t)rank + 0x9e3779b97f4a7c15ULL + (uint64_t)time(nullptr));
-    std::bernoulli_distribution coin(0.5);
-    vector<Edge> local_sample; local_sample.reserve(local_m/2 + 4);
-    for (auto &e : local_edges) if (coin(rng)) local_sample.push_back(e);
-
-    // 2) Recursively compute MST(S) (distributed) -> it returns replicated MST_S on all ranks
-    vector<Edge> mstS = distributed_kkt_mst(local_sample, n, debug, base_threshold);
-
-    // 3) Build LCA on MST(S) (replicated tree(s) on all ranks)
-    vector<vector<pair<int,pair<int,double>>>> adj = build_adj(n, mstS);
-    LCA lca; lca.build(n, adj);
-
-    // 4) Filter edges: keep only edges with w < max_on_path(u,v) in MST(S)
-    vector<Edge> local_candidates; local_candidates.reserve(local_m/10);
-    for (auto &e : local_edges) {
-        double mx = lca.max_on_path(e.u, e.v);
-        // if u and v disconnected in MST(S), mx might be -1.0 -> keep the edge
-        if (mx < 0.0 || e.w < mx - 1e-12) {
-            local_candidates.push_back(e);
-        }
-    }
-    // optional debug info: how many edges kept
-    int kept_local = (int)local_candidates.size();
-    int kept_global = 0;
-    MPI_Allreduce(&kept_local, &kept_global, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
-    if (debug && rank==0) cerr<<"After filtering, kept_global="<<kept_global<<"\n";
-
-    // 5) Run distributed Boruvka on remaining candidates to finish MST
-    vector<Edge> final_mst = distributed_boruvka(local_candidates, n, debug);
-
-    // final_mst is returned only from Boruvka merging edges (constructed at root and returned as replicated vector)
-    return final_mst;
+    return picked;
 }
 
-int main(int argc, char** argv) {
+void print_usage_and_exit(const char *prog){
+    if(prog) cerr << "Usage: " << prog << " edges.txt n_vertices [--mode=<mode>] [--L=<levels>] [--R=<reps>] [--chunk_size=<size>]\n";
+    cerr << "Modes: default, chunk, sketch, chunk+sketch\n";
+    cerr << "Defaults: --mode=default --L=20 --R=4 --chunk_size=n_vertices\n";
+    MPI_Finalize();
+    exit(1);
+}
+
+int main(int argc, char** argv){
     MPI_Init(&argc, &argv);
-    int rank,size; MPI_Comm_rank(MPI_COMM_WORLD, &rank); MPI_Comm_size(MPI_COMM_WORLD, &size);
+    int rank, nproc;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &nproc);
 
-    if (argc < 3) {
-        if (rank==0) cerr<<"Usage: "<<argv[0]<<" edges.txt N_vertices [--block] [--debug]\n";
-        MPI_Finalize(); return 1;
+    if(argc < 3){ if(rank==0) print_usage_and_exit(argv[0]); }
+    string fname = argv[1];
+    int n_vertices = atoi(argv[2]);
+    string mode = "default";
+    int L = 20;
+    int R = 4;
+    long long chunk_size_val = -1; // if -1 -> use n_vertices
+
+    // parse optional flags from argv[3..]
+    for(int i=3;i<argc;i++){
+        string s = argv[i];
+        if(s=="-h" || s=="--help"){
+            if(rank==0) print_usage_and_exit(argv[0]);
+        }
+        if(s.rfind("--",0)==0){
+            // format --key=value
+            auto pos = s.find('=');
+            string key, val;
+            if(pos==string::npos){ key = s.substr(2); val = ""; }
+            else { key = s.substr(2,pos-2); val = s.substr(pos+1); }
+            if(key=="mode") {
+                if(!val.empty()) mode = val;
+            } else if(key=="L"){
+                if(!val.empty()) L = atoi(val.c_str());
+            } else if(key=="R"){
+                if(!val.empty()) R = atoi(val.c_str());
+            } else if(key=="chunk_size"){
+                if(!val.empty()) chunk_size_val = atoll(val.c_str());
+            } else {
+                if(rank==0) cerr << "Unknown flag: " << key << "\n";
+            }
+        } else {
+            if(rank==0) cerr << "Ignoring arg: " << s << "\n";
+        }
     }
-    string edgefile = argv[1];
-    int n = atoi(argv[2]);
-    bool block=false, debug=false;
-    for (int i=3;i<argc;i++){ string s=argv[i]; if (s=="--block") block=true; if (s=="--debug") debug=true; }
 
-    if (debug && rank==0) cerr<<"Starting distributed KKT MST with "<<size<<" ranks\n";
+    if(chunk_size_val <= 0) chunk_size_val = n_vertices;
 
-    vector<Edge> local_edges = load_partitioned_edges_roundrobin(edgefile, rank, size);
-    if (debug) { cerr<<"rank "<<rank<<" loaded "<<local_edges.size()<<" edges\n"; }
+    bool use_chunk = false;
+    bool use_sketch = false;
+    if(mode == "chunk") use_chunk = true;
+    else if(mode == "sketch") use_sketch = true;
+    else if(mode == "chunk+sketch") { use_chunk = true; use_sketch = true; }
 
-    vector<Edge> mst = distributed_kkt_mst(local_edges, n, debug);
+    vector<Edge> local_edges = read_partitioned_edges_with_gid(fname, rank, nproc);
+    long long local_m = (long long)local_edges.size();
+    long long m_total = 0;
+    MPI_Allreduce(&local_m, &m_total, 1, MPI_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
+    if(rank==0){ cerr << "Total edges m = " << m_total << ", n_vertices = " << n_vertices << ", processes = " << nproc << "\n"; }
 
-    // Final MST edges are stored (on root) as the edges produced by the last Boruvka call;
-    // but we return them replicated. Print only on root:
-    if (rank==0) {
-        cerr<<"Final MST edges count: "<<mst.size()<<"\n";
-        cout<<"# MST edges (u v w):\n";
-        for (auto &e: mst) cout<<e.u<<" "<<e.v<<" "<<e.w<<"\n";
+    vector<int> comp(n_vertices);
+    for(int v=0; v<n_vertices; ++v) comp[v]=v;
+
+    vector<pair<pair<int,int>, double>> mst_edges_root;
+    double mst_weight_root = 0.0;
+
+    long long chunk_size = chunk_size_val;
+    long long num_chunks = (m_total + chunk_size - 1) / chunk_size;
+
+    if(!use_chunk){
+        int iteration = 0;
+        while(true){
+            iteration++;
+            if(rank==0) cerr << "[Global] Boruvka iteration " << iteration << "\n";
+            vector<pair<pair<int,int>, double>> chosen;
+            if(use_sketch){
+                chosen = sketch_component_candidates_and_contract(local_edges, comp, rank, nproc, n_vertices, L, R);
+            } else {
+                chosen = deterministic_component_candidates_and_contract(local_edges, comp, rank, nproc, n_vertices);
+            }
+            if(rank==0){
+                if(chosen.empty()){
+                    cerr << "No chosen edges in this round -> graph might be disconnected or sketches failed. Breaking.\n";
+                    break;
+                }
+                for(auto &pe: chosen){ mst_edges_root.push_back(pe); mst_weight_root += pe.second; }
+            }
+            int unique_local = 0;
+            { unordered_set<int> s; for(int v=0; v<n_vertices; ++v) s.insert(comp[v]); unique_local = (int)s.size(); }
+            int unique_global = 0;
+            MPI_Allreduce(&unique_local, &unique_global, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+            if(rank==0) cerr << "After iter " << iteration << " components: " << unique_global << "\n";
+            if(unique_global <= 1) break;
+            if(iteration > 2 * (int)log2(max(2, n_vertices)) + 100){ if(rank==0) cerr << "Stopping after iteration limit\n"; break; }
+        }
+    } else {
+        if(rank == 0) cerr << "Chunk mode: num_chunks = " << num_chunks << ", chunk_size = " << chunk_size << "\n";
+        for(long long ch=0; ch < num_chunks; ++ch){
+            if(rank==0) cerr << "Processing chunk " << ch << "/" << num_chunks << "\n";
+            long long start = ch * chunk_size;
+            long long end = min(m_total, (ch+1)*chunk_size) - 1;
+            vector<Edge> chunk_edges;
+            chunk_edges.reserve( (size_t)min((long long)local_edges.size(), chunk_size / nproc + 16) );
+            for(auto &e: local_edges) if(e.gid >= start && e.gid <= end) chunk_edges.push_back(e);
+            vector<Edge> local_picked = local_maximal_forest_by_comp(chunk_edges, comp, n_vertices);
+            vector<double> packed = serialize_edges_double(local_picked);
+            int mylen = (int)packed.size();
+            vector<int> recvcounts(nproc);
+            MPI_Allgather(&mylen, 1, MPI_INT, recvcounts.data(), 1, MPI_INT, MPI_COMM_WORLD);
+            vector<int> displs(nproc);
+            int total = 0;
+            for(int i=0;i<nproc;i++){ displs[i]=total; total += recvcounts[i]; }
+            vector<double> recvbuf(total);
+            MPI_Allgatherv(packed.data(), mylen, MPI_DOUBLE, recvbuf.data(), recvcounts.data(), displs.data(), MPI_DOUBLE, MPI_COMM_WORLD);
+            vector<Edge> gathered = deserialize_edges_double(recvbuf);
+            bool progress = true;
+            int inner_iter = 0;
+            while(progress){
+                inner_iter++;
+                if(use_sketch){
+                    auto chosen = sketch_component_candidates_and_contract(gathered, comp, rank, nproc, n_vertices, L, R);
+                    if(rank==0){ if(chosen.empty()) progress = false; else { for(auto &pe: chosen){ mst_edges_root.push_back(pe); mst_weight_root += pe.second; } } }
+                } else {
+                    if(rank==0){
+                        unordered_map<int, tuple<double,int,int>> best;
+                        for(auto &e: gathered){ int cu = comp[e.u], cv = comp[e.v]; if(cu==cv) continue; auto it = best.find(cu); if(it==best.end() || e.w < get<0>(it->second)) best[cu] = {e.w, e.u, e.v}; it = best.find(cv); if(it==best.end() || e.w < get<0>(it->second)) best[cv] = {e.w, e.v, e.u}; }
+                        unordered_set<int> comps_set; for(int v=0; v<n_vertices; ++v) comps_set.insert(comp[v]); unordered_map<int,int> comp_to_idx; int idx=0; for(auto &x: comps_set) comp_to_idx[x]=idx++;
+                        DSU comp_dsu(idx);
+                        vector<pair<pair<int,int>, double>> chosen_local;
+                        for(auto &kv: best){ double w = get<0>(kv.second); int u=get<1>(kv.second), v=get<2>(kv.second); int cu=comp[u], cv=comp[v]; if(cu==cv) continue; if(comp_dsu.unite(comp_to_idx[cu], comp_to_idx[cv])) chosen_local.push_back({{u,v}, w}); }
+                        vector<int> newComp(n_vertices); unordered_map<int,int> remap; int cur=0; for(int v=0; v<n_vertices; ++v){ int rootidx = comp_dsu.find(comp_to_idx[ comp[v] ]); if(remap.find(rootidx) == remap.end()) remap[rootidx] = cur++; newComp[v] = remap[rootidx]; }
+                        MPI_Bcast(newComp.data(), n_vertices, MPI_INT, 0, MPI_COMM_WORLD);
+                        comp.swap(newComp);
+                        for(auto &pe: chosen_local){ mst_edges_root.push_back(pe); mst_weight_root += pe.second; }
+                        progress = !chosen_local.empty();
+                    } else {
+                        vector<int> newComp(n_vertices);
+                        MPI_Bcast(newComp.data(), n_vertices, MPI_INT, 0, MPI_COMM_WORLD);
+                        comp.swap(newComp);
+                    }
+                }
+                int unique_local = 0; { unordered_set<int> s; for(int v=0; v<n_vertices; ++v) s.insert(comp[v]); unique_local = (int)s.size(); }
+                int unique_global = 0; MPI_Allreduce(&unique_local, &unique_global, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+                if(rank==0){ if(unique_global <= 1) { progress = false; break; } }
+                if(inner_iter > 64) { if(rank==0) cerr << "inner_iter limit reached\n"; break; }
+                break; // conservative: run at most one inner loop iteration per chunk (safe for demo)
+            }
+        }
+    }
+
+    if(rank==0){
+        cerr << "Final MST weight (sum of selected edges, may be approximate if graph disconnected): " << mst_weight_root << "\n";
+        cout << "MST edges (u v):\n";
+        for(auto &pe: mst_edges_root) cout << pe.first.first << " " << pe.first.second << "\n";
     }
 
     MPI_Finalize();
     return 0;
 }
-
