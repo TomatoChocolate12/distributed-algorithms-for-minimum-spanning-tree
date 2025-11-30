@@ -1,0 +1,77 @@
+==========================================
+SLURM_JOB_ID = 52104
+SLURM_NODELIST = node06
+SLURM_JOB_GPUS = 
+==========================================
+Compiling...
+Running GHS with 30 processes...
+[node06.local:2481296] mca_base_component_repository_open: unable to open mca_pml_ucx: libucp.so.0: cannot open shared object file: No such file or directory (ignored)
+[node06.local:2481296] mca_base_component_repository_open: unable to open mca_osc_ucx: libucp.so.0: cannot open shared object file: No such file or directory (ignored)
+[node06.local:2481298] mca_base_component_repository_open: unable to open mca_pml_ucx: libucp.so.0: cannot open shared object file: No such file or directory (ignored)
+[node06.local:2481292] mca_base_component_repository_open: unable to open mca_pml_ucx: libucp.so.0: cannot open shared object file: No such file or directory (ignored)
+[node06.local:2481298] mca_base_component_repository_open: unable to open mca_osc_ucx: libucp.so.0: cannot open shared object file: No such file or directory (ignored)
+[node06.local:2481292] mca_base_component_repository_open: unable to open mca_osc_ucx: libucp.so.0: cannot open shared object file: No such file or directory (ignored)
+[node06.local:2481289] mca_base_component_repository_open: unable to open mca_pml_ucx: libucp.so.0: cannot open shared object file: No such file or directory (ignored)
+[node06.local:2481290] mca_base_component_repository_open: unable to open mca_pml_ucx: libucp.so.0: cannot open shared object file: No such file or directory (ignored)
+[node06.local:2481289] mca_base_component_repository_open: unable to open mca_osc_ucx: libucp.so.0: cannot open shared object file: No such file or directory (ignored)
+[node06.local:2481290] mca_base_component_repository_open: unable to open mca_osc_ucx: libucp.so.0: cannot open shared object file: No such file or directory (ignored)
+[node06.local:2481285] mca_base_component_repository_open: unable to open mca_pml_ucx: libucp.so.0: cannot open shared object file: No such file or directory (ignored)
+[node06.local:2481285] mca_base_component_repository_open: unable to open mca_osc_ucx: libucp.so.0: cannot open shared object file: No such file or directory (ignored)
+[node06.local:2481318] mca_base_component_repository_open: unable to open mca_pml_ucx: libucp.so.0: cannot open shared object file: No such file or directory (ignored)
+[node06.local:2481318] mca_base_component_repository_open: unable to open mca_osc_ucx: libucp.so.0: cannot open shared object file: No such file or directory (ignored)
+[node06.local:2481291] mca_base_component_repository_open: unable to open mca_pml_ucx: libucp.so.0: cannot open shared object file: No such file or directory (ignored)
+[node06.local:2481291] mca_base_component_repository_open: unable to open mca_osc_ucx: libucp.so.0: cannot open shared object file: No such file or directory (ignored)
+[node06.local:2481326] mca_base_component_repository_open: unable to open mca_pml_ucx: libucp.so.0: cannot open shared object file: No such file or directory (ignored)
+[node06.local:2481326] mca_base_component_repository_open: unable to open mca_osc_ucx: libucp.so.0: cannot open shared object file: No such file or directory (ignored)
+[node06.local:2481330] mca_base_component_repository_open: unable to open mca_pml_ucx: libucp.so.0: cannot open shared object file: No such file or directory (ignored)
+[node06.local:2481330] mca_base_component_repository_open: unable to open mca_osc_ucx: libucp.so.0: cannot open shared object file: No such file or directory (ignored)
+[node06.local:2481302] mca_base_component_repository_open: unable to open mca_pml_ucx: libucp.so.0: cannot open shared object file: No such file or directory (ignored)
+[node06.local:2481302] mca_base_component_repository_open: unable to open mca_osc_ucx: libucp.so.0: cannot open shared object file: No such file or directory (ignored)
+[node06.local:2481349] mca_base_component_repository_open: unable to open mca_pml_ucx: libucp.so.0: cannot open shared object file: No such file or directory (ignored)
+[node06.local:2481349] mca_base_component_repository_open: unable to open mca_osc_ucx: libucp.so.0: cannot open shared object file: No such file or directory (ignored)
+[node06.local:2481334] mca_base_component_repository_open: unable to open mca_pml_ucx: libucp.so.0: cannot open shared object file: No such file or directory (ignored)
+[node06.local:2481334] mca_base_component_repository_open: unable to open mca_osc_ucx: libucp.so.0: cannot open shared object file: No such file or directory (ignored)
+[node06.local:2481310] mca_base_component_repository_open: unable to open mca_pml_ucx: libucp.so.0: cannot open shared object file: No such file or directory (ignored)
+[node06.local:2481310] mca_base_component_repository_open: unable to open mca_osc_ucx: libucp.so.0: cannot open shared object file: No such file or directory (ignored)
+[node06.local:2481344] mca_base_component_repository_open: unable to open mca_pml_ucx: libucp.so.0: cannot open shared object file: No such file or directory (ignored)
+[node06.local:2481344] mca_base_component_repository_open: unable to open mca_osc_ucx: libucp.so.0: cannot open shared object file: No such file or directory (ignored)
+[node06.local:2481307] mca_base_component_repository_open: unable to open mca_pml_ucx: libucp.so.0: cannot open shared object file: No such file or directory (ignored)
+[node06.local:2481307] mca_base_component_repository_open: unable to open mca_osc_ucx: libucp.so.0: cannot open shared object file: No such file or directory (ignored)
+[node06.local:2481359] mca_base_component_repository_open: unable to open mca_pml_ucx: libucp.so.0: cannot open shared object file: No such file or directory (ignored)
+[node06.local:2481359] mca_base_component_repository_open: unable to open mca_osc_ucx: libucp.so.0: cannot open shared object file: No such file or directory (ignored)
+[node06.local:2481353] mca_base_component_repository_open: unable to open mca_pml_ucx: libucp.so.0: cannot open shared object file: No such file or directory (ignored)
+[node06.local:2481355] mca_base_component_repository_open: unable to open mca_pml_ucx: libucp.so.0: cannot open shared object file: No such file or directory (ignored)
+[node06.local:2481353] mca_base_component_repository_open: unable to open mca_osc_ucx: libucp.so.0: cannot open shared object file: No such file or directory (ignored)
+[node06.local:2481355] mca_base_component_repository_open: unable to open mca_osc_ucx: libucp.so.0: cannot open shared object file: No such file or directory (ignored)
+[node06.local:2481337] mca_base_component_repository_open: unable to open mca_pml_ucx: libucp.so.0: cannot open shared object file: No such file or directory (ignored)
+[node06.local:2481337] mca_base_component_repository_open: unable to open mca_osc_ucx: libucp.so.0: cannot open shared object file: No such file or directory (ignored)
+[node06.local:2481342] mca_base_component_repository_open: unable to open mca_pml_ucx: libucp.so.0: cannot open shared object file: No such file or directory (ignored)
+[node06.local:2481305] mca_base_component_repository_open: unable to open mca_pml_ucx: libucp.so.0: cannot open shared object file: No such file or directory (ignored)
+[node06.local:2481342] mca_base_component_repository_open: unable to open mca_osc_ucx: libucp.so.0: cannot open shared object file: No such file or directory (ignored)
+[node06.local:2481305] mca_base_component_repository_open: unable to open mca_osc_ucx: libucp.so.0: cannot open shared object file: No such file or directory (ignored)
+[node06.local:2481322] mca_base_component_repository_open: unable to open mca_pml_ucx: libucp.so.0: cannot open shared object file: No such file or directory (ignored)
+[node06.local:2481322] mca_base_component_repository_open: unable to open mca_osc_ucx: libucp.so.0: cannot open shared object file: No such file or directory (ignored)
+[node06.local:2481301] mca_base_component_repository_open: unable to open mca_pml_ucx: libucp.so.0: cannot open shared object file: No such file or directory (ignored)
+[node06.local:2481301] mca_base_component_repository_open: unable to open mca_osc_ucx: libucp.so.0: cannot open shared object file: No such file or directory (ignored)
+[node06.local:2481287] mca_base_component_repository_open: unable to open mca_pml_ucx: libucp.so.0: cannot open shared object file: No such file or directory (ignored)
+[node06.local:2481287] mca_base_component_repository_open: unable to open mca_osc_ucx: libucp.so.0: cannot open shared object file: No such file or directory (ignored)
+[node06.local:2481293] mca_base_component_repository_open: unable to open mca_pml_ucx: libucp.so.0: cannot open shared object file: No such file or directory (ignored)
+[node06.local:2481293] mca_base_component_repository_open: unable to open mca_osc_ucx: libucp.so.0: cannot open shared object file: No such file or directory (ignored)
+[node06.local:2481314] mca_base_component_repository_open: unable to open mca_pml_ucx: libucp.so.0: cannot open shared object file: No such file or directory (ignored)
+[node06.local:2481314] mca_base_component_repository_open: unable to open mca_osc_ucx: libucp.so.0: cannot open shared object file: No such file or directory (ignored)
+[node06.local:2481286] mca_base_component_repository_open: unable to open mca_pml_ucx: libucp.so.0: cannot open shared object file: No such file or directory (ignored)
+[node06.local:2481286] mca_base_component_repository_open: unable to open mca_osc_ucx: libucp.so.0: cannot open shared object file: No such file or directory (ignored)
+[node06.local:2481312] mca_base_component_repository_open: unable to open mca_pml_ucx: libucp.so.0: cannot open shared object file: No such file or directory (ignored)
+[node06.local:2481312] mca_base_component_repository_open: unable to open mca_osc_ucx: libucp.so.0: cannot open shared object file: No such file or directory (ignored)
+[node06.local:2481288] mca_base_component_repository_open: unable to open mca_pml_ucx: libucp.so.0: cannot open shared object file: No such file or directory (ignored)
+[node06.local:2481288] mca_base_component_repository_open: unable to open mca_osc_ucx: libucp.so.0: cannot open shared object file: No such file or directory (ignored)
+
+=== Distributed GHS Benchmark ===
+Nodes: 30
+Time Taken: 0.000285863 seconds
+Total Messages: 547
+Total Data Sent: 3376 bytes
+Avg Data/Node: 112 bytes
+Max Level: 2
+=================================
+Done.

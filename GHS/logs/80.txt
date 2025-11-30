@@ -1,0 +1,21 @@
+==========================================
+SLURM_JOB_ID = 52155
+SLURM_NODELIST = node[01-02]
+SLURM_JOB_GPUS = 
+==========================================
+Compiling...
+Running GHS with 80 processes...
+
+=== Distributed GHS Benchmark ===
+Nodes: 80
+Time Taken: 0.00293115 seconds
+Total Messages: 3042
+Total Data Sent: 18824 bytes
+Avg Data/Node: 235 bytes
+Max Level: 3
+=================================
+[1764539711.057046] [node02:2872327:0]       tag_match.c:62   UCX  WARN  unexpected tag-receive descriptor 0xe9d9c0 was not matched
+[1764539711.097456] [node01:2242954:0]       tag_match.c:62   UCX  WARN  unexpected tag-receive descriptor 0x13c4740 was not matched
+[1764539711.097724] [node01:2243084:0]       tag_match.c:62   UCX  WARN  unexpected tag-receive descriptor 0x10a6ac0 was not matched
+[1764539711.097876] [node01:2242938:0]       tag_match.c:62   UCX  WARN  unexpected tag-receive descriptor 0x2329640 was not matched
+Done.
