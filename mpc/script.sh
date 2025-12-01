@@ -1,59 +1,54 @@
 #!/bin/bash
 #SBATCH --job-name=mst_mpc_linear
-#SBATCH --nodes=2
-#SBATCH --ntasks-per-node=48
-#SBATCH --cpus-per-task=1
+#SBATCH --nodes=1
+#SBATCH -c 40
 #SBATCH --time=00:10:00
 #SBATCH --output=mst_output_%j.txt
 #SBATCH --partition=debug   # Check your cluster documentation for partition names
 
 # Load MPI Module (Adjust based on your cluster, e.g., 'module load openmpi/4.1.1')
-module load openmpi 
+module load openmpi/4.1.0
 # Or sometimes: module load intel-mpi
 
 # Define file names
-SRC_FILE="graph_sketching.cpp"
-EXE_FILE="graph_sketching"
-GRAPH_FILE="edges_rand_dense.txt"
-NODES=1000
-EDGES=15000
-
-echo "=========================================="
-echo "Running on hosts: $(hostname)"
-echo "Nodes: $SLURM_JOB_NUM_NODES"
-echo "Tasks per node: $SLURM_NTASKS_PER_NODE"
-echo "Total Ranks: $SLURM_NTASKS"
-echo "=========================================="
+# Define files
+SRC="graph_sketching.cpp"
+EXE="graph_sketching"
+GRAPH="graph.txt"
 
 # 1. Compile
-echo "[Step 1] Compiling C++ code..."
-mpic++ -O3 -std=c++11 $SRC_FILE -o $EXE_FILE
+mpic++ -O3 -std=c++11 $SRC -o $EXE
 
-if [ $? -ne 0 ]; then
-    echo "Compilation failed!"
-    exit 1
-fi
+# Write CSV Header to output file
+echo "Experiment_Type,Processors,Nodes,Edges,SortTime,SketchTime,TotalTime,TotalBytes"
 
-# 2. Generate Synthetic Graph (Python one-liner)
-# Format: u v w
-# echo "[Step 2] Generating random graph with $NODES nodes and $EDGES edges..."
-# python3 -c "
-# import random
-# nodes = $NODES
-# edges = $EDGES
-# with open('$GRAPH_FILE', 'w') as f:
-#     for _ in range(edges):
-#         u = random.randint(0, nodes-1)
-#         v = random.randint(0, nodes-1)
-#         while u == v: v = random.randint(0, nodes-1)
-#         w = random.randint(1, 1000)
-#         f.write(f'{u} {v} {w}\n')
-# "
+# --- EXPERIMENT 1: Time vs Number of Nodes (Scaling N) ---
+# Fixed Processors (P=20), varying Nodes
+P_FIXED=40
+echo "Running Node Scaling Experiments (P=$P_FIXED)..." >&2
 
-# 3. Run MPI Job
-echo "[Step 3] Executing MST Algorithm..."
-# mpirun knows to check SLURM environment variables for node lists
-mpirun ./$EXE_FILE $GRAPH_FILE $NODES
+for N in 1000 5000 10000 20000 50000; do
+    # Generate graph with M = 10 * N
+    M=$((N * 10))
+    python3 -c "import random; n=$N; m=$M; print('\n'.join(f'{random.randint(0,n-1)} {random.randint(0,n-1)} {random.randint(1,1000)}' for _ in range(m)))" > $GRAPH
+    
+    # Run and prepend tag "NodeScaling"
+    mpirun -np $P_FIXED ./$EXE $GRAPH $N | grep "RESULTS" | sed "s/RESULTS,/NodeScaling,/"
+done
 
-echo "=========================================="
-echo "Job Complete."
+# --- EXPERIMENT 2: Time vs Number of Processors (Scaling P) ---
+# Fixed Nodes (N=20000, M=200000), varying Processors
+N_FIXED=20000
+M_FIXED=200000
+python3 -c "import random; n=$N_FIXED; m=$M_FIXED; print('\n'.join(f'{random.randint(0,n-1)} {random.randint(0,n-1)} {random.randint(1,1000)}' for _ in range(m)))" > $GRAPH
+
+echo "Running Processor Scaling Experiments (N=$N_FIXED)..." >&2
+
+for P in 4 8 16 32 40; do
+    # Run and prepend tag "ProcScaling"
+    mpirun -np $P ./$EXE $GRAPH $N_FIXED | grep "RESULTS" | sed "s/RESULTS,/ProcScaling,/"
+done
+
+# Cleanup
+rm $GRAPH
+rm $EXE
