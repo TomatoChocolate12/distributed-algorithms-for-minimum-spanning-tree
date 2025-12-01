@@ -1,19 +1,19 @@
 #!/bin/bash
-#SBATCH --job-name=mst_agm_mpc
+#SBATCH --job-name=mst_mpc_linear
 #SBATCH --nodes=2
-#SBATCH --ntasks-per-node=50
+#SBATCH --ntasks-per-node=48
 #SBATCH --cpus-per-task=1
 #SBATCH --time=00:10:00
 #SBATCH --output=mst_output_%j.txt
-#SBATCH --partition=standard   # Check your cluster documentation for partition names
+#SBATCH --partition=debug   # Check your cluster documentation for partition names
 
 # Load MPI Module (Adjust based on your cluster, e.g., 'module load openmpi/4.1.1')
 module load openmpi 
 # Or sometimes: module load intel-mpi
 
 # Define file names
-SRC_FILE="mst_agm_amplified.cpp"
-EXE_FILE="mst_agm"
+SRC_FILE="graph_sketching.cpp"
+EXE_FILE="graph_sketching"
 GRAPH_FILE="edges_rand_dense.txt"
 NODES=1000
 EDGES=15000
